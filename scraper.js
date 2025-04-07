@@ -1,95 +1,70 @@
 import fetch from 'node-fetch';
-import cheerio from 'cheerio';
+import { load } from 'cheerio';
 
+// 環境変数から読み取り
 const LINE_TOKEN = process.env.LINE_ACCESS_TOKEN;
-const USER_ID = process.env.LINE_USER_ID;
-const MAX_HISTORY = 20;
+const LINE_USER_ID = process.env.LINE_USER_ID;
+const LAST_VIDEO_URL = process.env.NOTIFIED_LINKS || '';
 
 const TARGET_URL = 'https://www.jw.org/ja/ライブラリー/ビデオ/#ja/mediaitems/StudioMonthlyPrograms';
 
-async function fetchHTML(url) {
-  const res = await fetch(url, {
+const sendToLine = async (message) => {
+  const res = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
     headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${LINE_TOKEN}`
     },
+    body: JSON.stringify({
+      to: LINE_USER_ID,
+      messages: [{ type: "text", text: message }]
+    })
   });
-  return await res.text();
-}
 
-function extractVideos(html) {
-  const $ = cheerio.load(html);
-  const videos = [];
+  const result = await res.json();
+  console.log("LINE response:", result);
+};
 
-  $('.media-item').each((_, elem) => {
-    const title = $(elem).find('.title').text().trim();
-    const href = $(elem).find('a').attr('href');
+const main = async () => {
+  console.log("▶️ スクレイピング開始");
 
-    if (title && href) {
-      videos.push({
-        title,
-        url: new URL(href, 'https://www.jw.org').href,
-      });
+  const res = await fetch(TARGET_URL);
+  const html = await res.text();
+  const $ = load(html);
+
+  const items = $('.media-item');
+  const results = [];
+
+  items.each((i, el) => {
+    const href = $(el).find('a').attr('href');
+    const title = $(el).find('.title').text().trim();
+
+    if (href && title) {
+      const fullUrl = `https://www.jw.org${href}`;
+      results.push({ title, url: fullUrl });
     }
   });
 
-  return videos;
-}
-
-async function sendToLine(text) {
-  const res = await fetch('https://api.line.me/v2/bot/message/push', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${LINE_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      to: USER_ID,
-      messages: [{ type: 'text', text }],
-    }),
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    console.error('LINE送信失敗:', data);
-  }
-}
-
-async function run() {
-  console.log('🔍 ビデオ一覧を取得中...');
-  const html = await fetchHTML(TARGET_URL);
-  const videos = extractVideos(html);
-
-  if (videos.length === 0) {
-    console.log('⚠️ ビデオが見つかりませんでした。');
+  if (results.length === 0) {
+    console.log("🛑 ビデオ項目が見つかりませんでした");
     return;
   }
 
-  const notifiedRaw = process.env.NOTIFIED_LINKS || '';
-  const notified = notifiedRaw.split(',').filter(Boolean);
+  const latest = results[0];
 
-  const newVideos = videos.filter(v => !notified.includes(v.url));
-
-  if (newVideos.length === 0) {
-    console.log('✅ 新着ビデオはありません。');
+  if (latest.url === LAST_VIDEO_URL) {
+    console.log("🔁 既に通知済みのビデオです");
     return;
   }
 
-  for (const v of newVideos.reverse()) {
-    const message = `🆕 新着ビデオ：${v.title}\n🔗 ${v.url}`;
-    console.log('📤 通知:', message);
-    await sendToLine(message);
-  }
+  // LINE通知
+  await sendToLine(`🆕 新しいビデオが公開されました:\n${latest.title}\n${latest.url}`);
 
-  // 新しい履歴として保持（最新MAX_HISTORY件）
-  const updated = [...newVideos.map(v => v.url), ...notified].slice(0, MAX_HISTORY);
-  const encoded = updated.join(',');
+  // 通知済みURLをログ出力（Secrets更新は自動ではできない）
+  console.log("🔗 このURLを NOTIFIED_LINKS にセットしてください：", latest.url);
+};
 
-  // GitHub Actions の output に保存（再利用しやすい）
-  console.log(`::add-mask::${encoded}`);
-  console.log(`::set-output name=UPDATED_LINKS::${encoded}`);
-}
-
-run().catch(err => {
-  console.error('❌ エラー発生:', err);
+main().catch(err => {
+  console.error("❌ エラー:", err);
   process.exit(1);
 });
